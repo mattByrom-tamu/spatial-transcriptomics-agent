@@ -1,7 +1,4 @@
-__pycache__/db.cpython-312.pyc
-__pycache__/db.cpython-312.pyc
-__pycache__/ingest_paper.cpython-312.pyc
-__pycache__/section_summarizer.cpython-312.pyc
+
 
 # Python
 __pycache__/
@@ -29,3 +26,7 @@ Thumbs.db
 # Local config / secrets
 .env
 *.env
+__pycache__/db.cpython-312.pyc
+__pycache__/db.cpython-312.pyc
+__pycache__/ingest_paper.cpython-312.pyc
+__pycache__/section_summarizer.cpython-312.pyc
