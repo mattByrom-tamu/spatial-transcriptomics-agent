@@ -61,21 +61,48 @@ def ingest_paper(pdf_path: str, figures_output_dir: Optional[str] = None) -> Ing
             image_filename = f"page{page_idx}_img{img_index}.png"
             image_path = os.path.join(figures_output_dir, image_filename)
 
-            if pix.n > 4:  # handle CMYK images and converts to RBG for compatability 
-                pix = fitz.Pixmap(fitz.csRGB, pix)
+            try:
+                # Normalize to RGB colorspace if needed
+                if pix.colorspace is None or pix.colorspace != fitz.csRGB:
+                    pix_converted = fitz.Pixmap(fitz.csRGB, pix)
+                else:
+                    pix_converted = pix
 
-            pix.save(image_path)
+                # Drop alpha channel if present (keeps PNGs simple)
+                if pix_converted.alpha:
+                    pix_final = fitz.Pixmap(pix_converted, 0)
+                else:
+                    pix_final = pix_converted
 
-            figures.append(
-                FigureContent(
-                    page_number=page_idx,
-                    image_index=img_index,
-                    image_path=image_path
+                # Save the image
+                pix_final.save(image_path)
+
+                figures.append(
+                    FigureContent(
+                        page_number=page_idx,
+                        image_index=img_index,
+                        image_path=image_path,
+                    )
                 )
-            )
 
-            pix = None
+            except ValueError as e:
+                # If PyMuPDF still complains about colorspace, skip this image
+                print(
+                    f"[WARN] Skipping image {img_index} on page {page_idx} "
+                    f"due to colorspace error: {e}"
+                )
 
+            finally:
+                # Let PyMuPDF release resources
+                pix = None
+                try:
+                    pix_converted = None
+                except NameError:
+                    pass
+                try:
+                    pix_final = None
+                except NameError:
+                    pass
     doc.close()
 
     return IngestedPaper(

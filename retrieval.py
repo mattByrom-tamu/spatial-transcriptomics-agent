@@ -203,8 +203,7 @@ def main():
     """
     # You can change this question or make it interactive
     test_question = (
-        "What are the main advantages of ELLA compared to previous methods "
-        "for modeling subcellular spatial variation of gene expression?"
+        "Compare SPARK, SpatialDE, and Trendsceek?"
     )
 
     # If you want to restrict to one paper, set paper_id here:
@@ -214,7 +213,7 @@ def main():
     agent = Agent(
         name="SpatialTranscriptomicsQAAssistant",
         instructions=(
-            "You are a spatial transcriptomics research assistant. "
+            "You are a spatial transcriptomics researcher. "
             "You answer questions using provided context from scientific papers "
             "and you avoid hallucinating details that are not supported."
         ),

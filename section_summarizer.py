@@ -1,6 +1,7 @@
 # section_summarizer.py
 # https://docs.python.org/3/library/re.html
 # https://docs.python.org/3/library/uuid.html
+
 import re
 import uuid
 from dataclasses import dataclass
@@ -9,14 +10,29 @@ from typing import List, Dict, Optional, Tuple
 from agents import Agent, Runner  # your existing Agents SDK
 from ingest_paper import IngestedPaper
 
+
+# ---------- Basic helpers ----------
+
+def combine_pages_to_full_text(ingested: IngestedPaper) -> str:
+    """
+    Combine all page texts from an ingested paper into a single string.
+
+    Assumes ingested.pages is a list of page-like objects with a .text attribute.
+    """
+    # If your IngestedPaper uses a different attribute (e.g. just strings),
+    # adjust this line accordingly.
+    return "\n\n".join(page.text for page in ingested.pages)
+
+
 # ---------- Data classes ----------
 
-# Contains a chunk of text from one logical section 
+# Contains a chunk of text from one logical section
 @dataclass
 class SectionChunk:
     section_name: str
     chunk_index: int
     text: str
+
 
 # contains a merged summary of an entire section
 @dataclass
@@ -25,13 +41,15 @@ class SectionSummary:
     summary_text: str
     key_points: List[str]
 
+
 # High lvl overview of entire paper
 @dataclass
 class PaperSummary:
     source_path: str
     sections: List[SectionSummary]
 
-# RAG chunk, text that's easily retrieveable 
+
+# RAG chunk, text that's easily retrievable
 @dataclass
 class RAGDocument:
     """
@@ -39,7 +57,7 @@ class RAGDocument:
     Later, you'll store:
       - text      -> TEXT column
       - metadata  -> JSONB column
-      - embedding -> vector (OpenAI embedding model)
+      - embedding -> vector (OpenAI embedding model or array)
     """
     doc_id: str
     text: str
@@ -47,8 +65,8 @@ class RAGDocument:
 
 
 # ---------- Section detection ----------
-# need help from Dr. Wong on these section paterns !!! 
-# section headings expected in the paper (verbatim)
+
+# section headings expected in the paper (verbatim / caps)
 SECTION_PATTERNS = [
     r"ABSTRACT",
     r"INTRODUCTION",
@@ -63,7 +81,6 @@ SECTION_PATTERNS = [
 ]
 
 # (?m) = multiline mode so ^ and $ work per line
-# returns exact position of words in SECTION_PATTERNS 
 SECTION_REGEX = re.compile(
     r"(?m)^(?P<header>" + "|".join(SECTION_PATTERNS) + r")\s*$"
 )
@@ -74,7 +91,7 @@ def split_into_sections(full_text: str) -> List[Tuple[str, str]]:
     Split the paper into rough sections based on headings.
 
     Returns a list of (section_name, section_text) tuples.
-    If no headings are found, returns a single ('FULL_TEXT', full_text).
+    If no headings are found, returns a single ('Full_Text', full_text).
     """
     matches = list(SECTION_REGEX.finditer(full_text))
 
@@ -143,14 +160,66 @@ def chunk_section(
     return chunks
 
 
-# ---------- Main summarizer + RAG prep ----------
+# ---------- RAG-only builder (no LLM) ----------
+
+def build_rag_docs_only(
+    ingested: IngestedPaper,
+    paper_id: Optional[str] = None,
+    max_chars: int = 4000,
+    overlap: int = 200,
+) -> List[RAGDocument]:
+    """
+    Build RAGDocument chunks from an ingested paper WITHOUT using the LLM.
+
+    - Combines pages into full text
+    - Splits into sections (or falls back to a single 'Full_Text' section)
+    - Chunks each section
+    - Returns a list of RAGDocument objects
+    """
+    if paper_id is None:
+        paper_id = str(uuid.uuid4())
+
+    # 1) Combine all pages into a single full text
+    full_text = combine_pages_to_full_text(ingested)
+
+    # 2) Split into logical sections (may return [] and we fall back)
+    sections = split_into_sections(full_text)
+    if not sections:
+        sections = [("Full_Text", full_text)]
+
+    rag_docs: List[RAGDocument] = []
+    for section_name, section_text in sections:
+        section_chunks = chunk_section(
+            section_name,
+            section_text,
+            max_chars=max_chars,
+            overlap_chars=overlap,
+        )
+        for chunk in section_chunks:
+            doc_id = f"{paper_id}:{chunk.section_name}:{chunk.chunk_index}"
+            rag_docs.append(
+                RAGDocument(
+                    doc_id=doc_id,
+                    text=chunk.text,
+                    metadata={
+                        "paper_id": str(paper_id),
+                        "source_path": ingested.source_path,
+                        "section_name": chunk.section_name,
+                        "chunk_index": str(chunk.chunk_index),
+                    },
+                )
+            )
+
+    return rag_docs
+
+
+# ---------- Main summarizer + RAG prep (LLM-based) ----------
 
 def summarize_paper_sections(
     agent: Agent,
     ingested: IngestedPaper,
     paper_id: Optional[str] = None,
 ) -> Tuple[PaperSummary, List[RAGDocument]]:
-    
     """
     - Combines pages into full text
     - Splits into sections
@@ -158,13 +227,12 @@ def summarize_paper_sections(
     - Summarizes each chunk with the LLM agent
     - Builds RAG-ready documents from raw chunks
     """
-    
     if paper_id is None:
         # Later you'll replace this with a DB-generated id
         paper_id = str(uuid.uuid4())
 
     # 1) Combine page texts into a single string
-    full_text = "\n\n".join(page.text for page in ingested.pages)
+    full_text = combine_pages_to_full_text(ingested)
 
     # 2) Rough section detection
     rough_sections = split_into_sections(full_text)
@@ -177,6 +245,7 @@ def summarize_paper_sections(
 
     # will give an idea of how many chunks being made
     print(f"[DEBUG] Total text chunks for summarization: {len(all_chunks)}")
+
     # 4) Summarize chunks + create RAG docs
     rag_docs: List[RAGDocument] = []
     per_section_summaries: Dict[str, List[str]] = {}
@@ -190,7 +259,7 @@ def summarize_paper_sections(
                 doc_id=doc_id,
                 text=chunk.text,
                 metadata={
-                    "paper_id": paper_id,
+                    "paper_id": str(paper_id),
                     "source_path": ingested.source_path,
                     "section_name": chunk.section_name,
                     "chunk_index": str(chunk.chunk_index),
@@ -198,7 +267,7 @@ def summarize_paper_sections(
             )
         )
 
-        # Summarize this chunk with your Agent, Can get Dr. Wongs input on this 
+        # Summarize this chunk with your Agent
         prompt = f"""
 You are a spatial transcriptomics research assistant.
 
@@ -210,7 +279,7 @@ of a scientific paper. Summarize the key points with emphasis on:
 - Any performance comparisons or benchmarks, if present.
 
 Return your answer as a short natural-language summary.
-        
+
 Chunk text:
 \"\"\"
 {chunk.text}
@@ -237,8 +306,8 @@ Chunk text:
         )
 
     paper_summary = PaperSummary(
-        source_path= ingested.source_path,
-        sections= section_summaries,
+        source_path=ingested.source_path,
+        sections=section_summaries,
     )
 
     return paper_summary, rag_docs
