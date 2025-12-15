@@ -7,6 +7,13 @@ __pycache__/
 *.pyd
 *.pkl
 
+# Local PDF folders
+extracted_figures/ 
+GPT Folder/
+Papers for GPT/ 
+Papers/ 
+Figures/ 
+
 # Virtual envs
 .venv/
 venv/
