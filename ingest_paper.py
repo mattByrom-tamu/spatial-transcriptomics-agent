@@ -35,7 +35,7 @@ class IngestedPaper:
 # Helpers
 # -----------------------------
 CAPTION_RE = re.compile(r"(?is)^\s*(fig\.|figure)\s*\d+")
-PANEL_LABEL_RE = re.compile(r"(?i)^\s*\(?\s*([a-h])\s*\)?\s*$")  # a..h (common)
+PANEL_LABEL_RE = re.compile(r"(?i)^\s*\(?\s*([a-h])\s*\)?\s*$")  # a..h
 
 
 def safe_stem_from_path(pdf_path: str) -> str:
@@ -59,7 +59,6 @@ def clamp_rect(r: fitz.Rect, page_rect: fitz.Rect) -> fitz.Rect:
     x1 = max(page_rect.x0, min(r.x1, page_rect.x1))
     y1 = max(page_rect.y0, min(r.y1, page_rect.y1))
     rr = fitz.Rect(x0, y0, x1, y1)
-    # Ensure non-empty
     if rr.x1 <= rr.x0 + 1:
         rr.x1 = rr.x0 + 1
     if rr.y1 <= rr.y0 + 1:
@@ -68,20 +67,14 @@ def clamp_rect(r: fitz.Rect, page_rect: fitz.Rect) -> fitz.Rect:
 
 
 def is_low_variance_pix(pix: fitz.Pixmap, std_thresh: float = 2.0) -> bool:
-    """
-    Simple blank/near-blank detection without numpy:
-    - sample bytes and approximate variance
-    """
     try:
         samples = pix.samples
         if not samples:
             return True
-        # Convert to grayscale-ish by sampling every 3rd/4th byte (cheap)
-        step = max(1, len(samples) // 20000)  # cap work
+        step = max(1, len(samples) // 20000)
         vals = []
-        n = pix.n  # channels
+        n = pix.n
         for i in range(0, len(samples), step * n):
-            # Average first 3 channels if present
             if i + 2 < len(samples):
                 v = (samples[i] + samples[i + 1] + samples[i + 2]) / 3.0
             else:
@@ -89,10 +82,8 @@ def is_low_variance_pix(pix: fitz.Pixmap, std_thresh: float = 2.0) -> bool:
             vals.append(v)
             if len(vals) >= 8000:
                 break
-
         if len(vals) < 50:
             return True
-
         mean = sum(vals) / len(vals)
         var = sum((v - mean) ** 2 for v in vals) / len(vals)
         std = var ** 0.5
@@ -107,10 +98,7 @@ def render_clip(page: fitz.Page, clip: fitz.Rect, zoom: float = 3.0) -> fitz.Pix
 
 
 def find_caption_blocks(page: fitz.Page) -> List[Tuple[fitz.Rect, str]]:
-    """
-    Return [(bbox, text)] for blocks whose text begins with Fig./Figure <number>
-    """
-    blocks = page.get_text("blocks")  # list of tuples
+    blocks = page.get_text("blocks")
     out: List[Tuple[fitz.Rect, str]] = []
     for b in blocks:
         x0, y0, x1, y1, txt = b[0], b[1], b[2], b[3], b[4]
@@ -122,60 +110,21 @@ def find_caption_blocks(page: fitz.Page) -> List[Tuple[fitz.Rect, str]]:
     return out
 
 
-def expand_bbox_with_panel_labels(page: fitz.Page, bbox: fitz.Rect, pad: float = 8.0, near_px: float = 60.0) -> fitz.Rect:
-    """
-    Panel labels (a/b/c/...) are often separate text blocks near the figure.
-    Expand bbox to include nearby single-letter blocks.
-    """
-    blocks = page.get_text("blocks")
-    expanded = fitz.Rect(bbox)
-    for b in blocks:
-        x0, y0, x1, y1, txt = b[0], b[1], b[2], b[3], b[4]
-        if not txt:
-            continue
-        t = txt.strip()
-        m = PANEL_LABEL_RE.match(t)
-        if not m:
-            continue
-
-        r = fitz.Rect(x0, y0, x1, y1)
-
-        # If the label block is close to bbox (within near_px) expand.
-        close_h = (r.x1 >= bbox.x0 - near_px) and (r.x0 <= bbox.x1 + near_px)
-        close_v = (r.y1 >= bbox.y0 - near_px) and (r.y0 <= bbox.y1 + near_px)
-        if close_h and close_v:
-            expanded |= r
-
-    # small padding
-    expanded.x0 -= pad
-    expanded.y0 -= pad
-    expanded.x1 += pad
-    expanded.y1 += pad
-    return expanded
-
-
 def build_visual_bbox(page: fitz.Page, min_draw_area_frac: float = 0.0005) -> Tuple[Optional[fitz.Rect], Dict[str, Any]]:
-    """
-    Build a bbox from:
-      - image rects (xref placements)
-      - vector drawing rects (plots often are vector)
-    Returns (bbox, debug_info)
-    """
     page_rect = page.rect
     page_area = page_rect.get_area()
 
     rects: List[fitz.Rect] = []
 
-    # Image rects
+    # raster placements (most reliable "figure" signal)
     img_rects_all: List[fitz.Rect] = []
     for img in page.get_images(full=True):
         xref = img[0]
-        rlist = page.get_image_rects(xref)
-        for r in rlist:
+        for r in page.get_image_rects(xref):
             img_rects_all.append(fitz.Rect(r))
     rects.extend(img_rects_all)
 
-    # Drawing rects (vector)
+    # vector drawings (can be polluted by outlined text in some PDFs)
     draw_rects: List[fitz.Rect] = []
     try:
         drawings = page.get_drawings()
@@ -184,7 +133,6 @@ def build_visual_bbox(page: fitz.Page, min_draw_area_frac: float = 0.0005) -> Tu
             if not r:
                 continue
             rr = fitz.Rect(r)
-            # ignore tiny rectangles (noise)
             if rr.get_area() < page_area * min_draw_area_frac:
                 continue
             draw_rects.append(rr)
@@ -195,7 +143,6 @@ def build_visual_bbox(page: fitz.Page, min_draw_area_frac: float = 0.0005) -> Tu
 
     bbox = rect_union(rects)
     bbox = clamp_rect(bbox, page_rect) if bbox else None
-
     union_ratio = (bbox.get_area() / page_area) if bbox else 0.0
 
     debug = {
@@ -208,10 +155,6 @@ def build_visual_bbox(page: fitz.Page, min_draw_area_frac: float = 0.0005) -> Tu
 
 
 def is_front_matter(page_text: str) -> bool:
-    """
-    Heuristic: title/cover pages often contain doi/received/accepted/published and
-    *do not* contain figure markers.
-    """
     t = (page_text or "").lower()
     has_fig = ("fig." in t) or ("figure" in t)
     front_terms = [
@@ -227,6 +170,52 @@ def is_front_matter(page_text: str) -> bool:
     return has_front and (not has_fig)
 
 
+def text_coverage_frac(
+    page: fitz.Page,
+    *,
+    min_chars: int = 60,
+    ignore_top_frac: float = 0.08,
+    ignore_bottom_frac: float = 0.08,
+) -> float:
+    """
+    Fraction of page area covered by "real" text blocks.
+    Helps reject pure text pages (including PDFs where text is outlined and inflates drawings).
+    """
+    pr = page.rect
+    page_area = pr.get_area()
+    if page_area <= 0:
+        return 0.0
+
+    top_y = pr.y0 + pr.height * ignore_top_frac
+    bot_y = pr.y1 - pr.height * ignore_bottom_frac
+
+    total = 0.0
+    blocks = page.get_text("blocks")
+    for b in blocks:
+        x0, y0, x1, y1, txt = b[0], b[1], b[2], b[3], b[4]
+        if not txt:
+            continue
+        r = fitz.Rect(x0, y0, x1, y1)
+
+        # ignore headers/footers
+        if r.y1 <= top_y or r.y0 >= bot_y:
+            continue
+
+        t = txt.strip()
+        if len(t) < min_chars:
+            continue
+
+        # don't count captions/panel labels as "body text"
+        if CAPTION_RE.match(t):
+            continue
+        if PANEL_LABEL_RE.match(t):
+            continue
+
+        total += r.get_area()
+
+    return max(0.0, min(1.0, total / page_area))
+
+
 # -----------------------------
 # Main
 # -----------------------------
@@ -236,19 +225,12 @@ def ingest_paper(
     *,
     skip_first_page: bool = True,
     zoom: float = 3.0,
-    union_ratio_threshold: float = 0.08,  # figure-like if bbox covers >= 8% of page
-    remove_caption: bool = True,
+    union_ratio_threshold: float = 0.03,     # still used as a weak signal
+    save_full_page: bool = True,
+    # NEW: remove "mostly text" pages
+    text_coverage_threshold: float = 0.35,
     verbose: bool = True,
 ) -> IngestedPaper:
-    """
-    Extract page text and cropped figure images.
-
-    - Skips first page (often title/front matter)
-    - Finds "figure-like" pages using union of image rects + vector drawing rects
-    - Crops to the visual bbox
-    - Expands bbox to include panel labels (a/b/c/...)
-    - Optionally removes caption area (Fig./Figure blocks)
-    """
 
     if figures_output_dir is None:
         figures_output_dir = os.path.join(os.getcwd(), "extracted_figures")
@@ -270,75 +252,67 @@ def ingest_paper(
 
     for page_idx in range(len(doc)):
         page = doc[page_idx]
-
         text = page.get_text("text") or ""
         pages.append(PageContent(page_number=page_idx, text=text))
 
-        # 1) Skip first page (requested)
         if skip_first_page and page_idx == 0:
             if verbose:
                 print(f"[ingest_paper] Page {page_idx + 1}: skipped (first page)")
             continue
 
-        # 2) Skip front matter pages (extra safety)
         if is_front_matter(text):
             if verbose:
                 print(f"[ingest_paper] Page {page_idx + 1}: skipped (front matter)")
             continue
 
+        caption_blocks = find_caption_blocks(page)
+        has_caption = len(caption_blocks) > 0
+        caption_used = None
+        if has_caption:
+            cap_rect, cap_text = sorted(caption_blocks, key=lambda x: x[0].y0, reverse=True)[0]
+            caption_used = cap_text
+
         bbox, dbg = build_visual_bbox(page)
-        fig_like = bbox is not None and dbg["union_ratio"] >= union_ratio_threshold
+
+        # NEW: body-text rejection
+        tfrac = text_coverage_frac(page)
+
+        # High-recall fig-like
+        fig_like = (
+            has_caption
+            or (dbg["img_rects"] > 0)
+            or (bbox is not None and dbg["union_ratio"] >= union_ratio_threshold)
+        )
+
+        # NEW: if it’s mostly body text and has no raster images, drop it
+        if fig_like and dbg["img_rects"] == 0 and tfrac >= text_coverage_threshold:
+            fig_like = False
 
         if verbose:
             print(
                 f"[ingest_paper] Page {page_idx + 1}: "
                 f"img_rects={dbg['img_rects']}, drawings={dbg['drawings_total']}, "
-                f"union_ratio={dbg['union_ratio']:.3f}, fig_like={fig_like}"
+                f"union_ratio={dbg['union_ratio']:.3f}, caption={has_caption}, "
+                f"text_cov={tfrac:.3f}, fig_like={fig_like}"
             )
 
-        if not fig_like or bbox is None:
+        if not fig_like:
             continue
 
-        # 3) Expand bbox to include nearby panel labels (a/b/c/…)
-        bbox2 = expand_bbox_with_panel_labels(page, bbox)
+        if not save_full_page:
+            continue
 
-        # 4) Remove caption area if present (caption is usually below figure)
-        caption_blocks = find_caption_blocks(page)
-        caption_used = None
-        if remove_caption and caption_blocks:
-            # pick the lowest caption block on the page (largest y0)
-            caption_blocks_sorted = sorted(caption_blocks, key=lambda x: x[0].y0, reverse=True)
-            cap_rect, cap_text = caption_blocks_sorted[0]
-            caption_used = cap_text
-
-            # If caption is below the figure bbox, crop figure to end just above caption.
-            # Small padding to avoid cutting off bottom axis labels.
-            if cap_rect.y0 > bbox2.y0 and cap_rect.y0 < page.rect.y1:
-                bbox2.y1 = min(bbox2.y1, cap_rect.y0 - 8.0)
-
-        bbox2 = clamp_rect(bbox2, page.rect)
-
-        # 5) Render cropped figure
-        pix = render_clip(page, bbox2, zoom=zoom)
-
-        # 6) Filter out blank/near-blank crops
+        pix = render_clip(page, page.rect, zoom=zoom)
         if is_low_variance_pix(pix, std_thresh=2.0):
             if verbose:
-                print(f"  -> skipped: low-variance/blank crop on page {page_idx + 1}")
+                print(f"  -> skipped: low-variance/blank render on page {page_idx + 1}")
             continue
 
-        # 7) Save
-        out_name = f"{stem}_p{page_idx + 1:02d}_fig.png"
+        out_name = f"{stem}_p{page_idx + 1:02d}_content.png"
         out_path = os.path.join(paper_fig_dir, out_name)
         pix.save(out_path)
 
-        figures.append(
-            FigureContent(
-                page_number=page_idx,
-                image_index=0,
-                image_path=out_path,
-            )
-        )
+        figures.append(FigureContent(page_number=page_idx, image_index=0, image_path=out_path))
 
         sidecar.append(
             {
@@ -346,8 +320,10 @@ def ingest_paper(
                 "pdf_path": os.path.abspath(pdf_path),
                 "page_number_0based": page_idx,
                 "image_path": out_path,
-                "bbox": [bbox2.x0, bbox2.y0, bbox2.x1, bbox2.y1],
+                "method": "full_page",
                 "union_ratio": dbg["union_ratio"],
+                "img_rects": dbg["img_rects"],
+                "text_coverage_frac": tfrac,
                 "caption_text": caption_used,
             }
         )
@@ -358,7 +334,6 @@ def ingest_paper(
 
         pix = None
 
-    # Write sidecar metadata
     try:
         meta_path = os.path.join(paper_fig_dir, f"{stem}_figures.json")
         with open(meta_path, "w", encoding="utf-8") as f:
@@ -372,7 +347,7 @@ def ingest_paper(
     doc.close()
 
     if verbose:
-        print(f"[ingest_paper] Done. Pages={len(pages)} Figures={len(figures)}")
+        print(f"[ingest_paper] Done. Pages={len(pages)} Figures(saved_pages)={len(figures)}")
 
     return IngestedPaper(
         source_path=os.path.abspath(pdf_path),
